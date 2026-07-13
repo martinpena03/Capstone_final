@@ -7,13 +7,13 @@
 #
 # Convenciones importantes (unica fuente de verdad):
 #   * DETENCION DEL ROBOT: x_ref=-10, y_ref=-10 es la señal que la ESP32
-#     interpreta como "detente". La publica laberinto_y_a_star.py mientras
+#     interpreta como "detente". La publica 03_laberinto_y_a_star.py mientras
 #     flag_obs este activa. NO cambiar esta convencion sin tocar el firmware.
-#   * flag_obs: la levanta (1) camara_y_deteccion.py al confirmar un
+#   * flag_obs: la levanta (1) 02_camara_y_deteccion.py al confirmar un
 #     obstaculo; la limpia (0) si el obstaculo se retira o cuando el nodo
 #     ya quedo bloqueado y el desvio esta en curso.
-#   * nodo_bloqueado: lo publica camara_y_deteccion.py cuando un obstaculo
-#     supera el timeout de re-evaluacion; laberinto_y_a_star.py lo marca
+#   * nodo_bloqueado: lo publica 02_camara_y_deteccion.py cuando un obstaculo
+#     supera el timeout de re-evaluacion; 03_laberinto_y_a_star.py lo marca
 #     bloqueado en su matriz y recalcula A*.
 #   * Topicos "planificador/*" son retenidos (retain=True): el broker
 #     entrega el ultimo valor a la web aunque se conecte despues.
@@ -70,12 +70,13 @@ mqtt_topics = {
         "v_der_ref": "robot/comandos/v_der_ref",
         "v_izq_ref": "robot/comandos/v_izq_ref",
         "v_total_ref": "robot/comandos/v_total_ref",
-        "x_ref": "robot/comandos/x_ref",                    # laberinto -> esp_python_serial (nodo a nodo)
-        "y_ref": "robot/comandos/y_ref",                    # laberinto -> esp_python_serial (nodo a nodo)
+        "x_ref": "robot/comandos/x_ref",                    # laberinto -> 01_esp_python_serial (nodo a nodo)
+        "y_ref": "robot/comandos/y_ref",                    # laberinto -> 01_esp_python_serial (nodo a nodo)
         "nodo_des": "robot/comandos/nodo_des",              # web -> laberinto (nodo objetivo)
         "reset_0": "robot/comandos/reset_0",
         "grafo": "robot/comandos/grafo",                    # web -> laberinto (laberinto editado)
         "pose_inicial": "robot/comandos/pose_inicial",      # web -> laberinto (nodo y orientacion de partida)
+        "limpiar_bloqueos": "robot/comandos/limpiar_bloqueos",  # web -> laberinto (boton limpiar rastro)
     },
 }
 # se usa: mqtt_topics["telemetria"]["v_der"], mqtt_topics["estados"]["conexion_esp"], mqtt_topics["comandos"]["duty_der"]

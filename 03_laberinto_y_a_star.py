@@ -21,8 +21,8 @@ Flujo de obstaculos (PRD A.1-A.3, la camara dirige los tiempos):
     nodo_bloqueado=N -> marcar N bloqueado en la matriz (persistente en la
                         sesion), recalcular A* y publicar la ruta nueva.
 
-Ejecutar:  python laberinto_y_a_star.py [--broker localhost] [--destino 54]
-Smoke test sin broker:  python laberinto_y_a_star.py --test
+Ejecutar:  python 03_laberinto_y_a_star.py [--broker localhost] [--destino 54]
+Smoke test sin broker:  python 03_laberinto_y_a_star.py --test
 """
 
 import argparse
@@ -395,6 +395,8 @@ class NavegadorLaberinto:
         client.subscribe(mqtt_topics["comandos"]["grafo"])
         # === ENLACE WEB (MQTT/WebSocket) — recepción de la pose inicial desde la UI ===
         client.subscribe(mqtt_topics["comandos"]["pose_inicial"])
+        # === ENLACE WEB (MQTT/WebSocket) — recepción de la orden de desbloquear casillas (botón limpiar rastro) ===
+        client.subscribe(mqtt_topics["comandos"]["limpiar_bloqueos"])
         # Señales del modulo de vision (camara_y_deteccion.py)
         client.subscribe(mqtt_topics["estados"]["flag_obs"])
         client.subscribe(mqtt_topics["camara"]["nodo_bloqueado"])
@@ -416,6 +418,10 @@ class NavegadorLaberinto:
 
             if msg.topic == mqtt_topics["comandos"]["pose_inicial"]:
                 self.aplicar_pose_inicial(payload_str)
+                return
+
+            if msg.topic == mqtt_topics["comandos"]["limpiar_bloqueos"]:
+                self.limpiar_bloqueos()
                 return
 
             if msg.topic == mqtt_topics["comandos"]["nodo_des"]:
@@ -470,6 +476,19 @@ class NavegadorLaberinto:
         self._ultima_ruta_json = None
         print(f"[BLOQUEO] Nodo {nodo} bloqueado. Recalculando A*.")
         self.publicar_grafo()  # la web redibuja la cruz estatica
+
+    def limpiar_bloqueos(self):
+        """Desbloquea todas las casillas bloqueadas por obstaculos (lo pide
+        el boton "limpiar rastro" de la web). El grafo republicado hace que
+        las cruces estaticas desaparezcan y que A* vuelva a considerar esos
+        nodos. Si el obstaculo sigue fisicamente ahi, la camara volvera a
+        detectarlo y a bloquearlo tras el timeout, como corresponde."""
+        if not self.nodos_bloqueados:
+            return
+        print(f"[BLOQUEO] Desbloqueando casillas: {sorted(self.nodos_bloqueados)}")
+        self.nodos_bloqueados.clear()
+        self._ultima_ruta_json = None
+        self.publicar_grafo()
 
     # ------------------------------------------------------------------
     # CICLO DE NAVEGACION (bucle principal, ~10 Hz)

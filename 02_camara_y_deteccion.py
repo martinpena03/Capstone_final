@@ -8,6 +8,10 @@ detencion / re-evaluacion / recalculo, y transmitir el video (POV) al
 dashboard web.
 
 Flujo de obstaculos (PRD A.1-A.3):
+    0. Un obstaculo detectado se atribuye al NODO AL FRENTE del nodo actual
+       (la celda contigua hacia la que mira el robot). Si entre ambas celdas
+       hay un muro, la deteccion se descarta: no se puede ver un obstaculo
+       a traves de una pared.
     1. Deteccion confirmada (N frames seguidos) -> flag_obs=1. El planificador
        responde publicando refs (-10,-10): el robot se detiene.
     2. Mientras flag_obs este activa se re-verifica cada --intervalo-reevaluacion
@@ -22,12 +26,14 @@ Flujo de obstaculos (PRD A.1-A.3):
 Todos los tiempos y umbrales son PARAMETROS de linea de comandos (PRD A.2/A.3):
 nada esta hardcodeado.
 
-Ejecutar (Jetson):   python camara_y_deteccion.py
-Ejecutar (PC, sin camara):  python camara_y_deteccion.py --sintetico
-Smoke test:          python camara_y_deteccion.py --sintetico --test
+Ejecutar (Jetson):   python 02_camara_y_deteccion.py
+Ejecutar (PC, sin camara):  python 02_camara_y_deteccion.py --sintetico
+Smoke test:          python 02_camara_y_deteccion.py --sintetico --test
 Ensayo determinista del ciclo completo de obstaculo (sin YOLO):
-    python camara_y_deteccion.py --sintetico --test-obstaculo 12,5,60
+    python 02_camara_y_deteccion.py --sintetico --test-obstaculo 12,5,60
     (obstaculo falso en el nodo 12, aparece a los 5 s, dura 60 s)
+    Con NODO="frente" el obstaculo falso se ubica en el nodo al frente del
+    robot, ejercitando la misma logica de atribucion que YOLO.
 """
 
 import argparse
@@ -43,8 +49,17 @@ from topicos import mqtt_topics
 from camara_util import abrir_fuente, CamaraEnHilo
 from yolo_backend import cargar_detector
 
-# Geometria del laberinto: misma fuente que el planificador (un solo lugar).
-from laberinto_y_a_star import POSITIONS as POSICIONES_BASE
+# Fallback del grafo del laberinto (espejo del grafo base del planificador).
+# Solo se usa hasta que llegue el grafo retenido por MQTT, que es la fuente
+# de verdad en runtime (incluye las ediciones hechas desde la web).
+CONEXIONES_BASE = {
+    "00": ["10", "01"], "01": ["00", "02"], "02": ["01"], "03": ["04", "13"], "04": ["03", "14"],
+    "10": ["00", "20"], "11": ["12", "21"], "12": ["11", "13", "22"], "13": ["03", "12"], "14": ["04", "24"],
+    "20": ["10", "30"], "21": ["22", "11"], "22": ["21", "32", "12", "23"], "23": ["24", "33", "22"], "24": ["14", "23", "34"],
+    "30": ["31", "20"], "31": ["30", "32"], "32": ["22", "31"], "33": ["23", "43"], "34": ["24"],
+    "40": ["50", "41"], "41": ["40", "42"], "42": ["41"], "43": ["33", "44"], "44": ["43", "54"],
+    "50": ["40", "51"], "51": ["50", "52"], "52": ["51", "53"], "53": ["52", "54"], "54": ["53", "44"],
+}
 
 # Clases COCO consideradas obstaculo, POR NOMBRE. Los ids se resuelven contra
 # model.names al cargar el detector (los ids escritos a mano del sistema viejo
@@ -84,12 +99,6 @@ def distancia_horizontal(y_base, cy, fy, altura_cm, pitch_deg):
     return altura_cm / math.tan(angulo)
 
 
-def desviacion_lateral(x_base, cx, fx):
-    """Angulo (rad) del objeto respecto del frente de la camara.
-    Positivo = a la derecha de la imagen."""
-    return math.atan2(x_base - cx, fx)
-
-
 class DetectorObstaculos:
     """Maquina de estados de obstaculos + streaming de video hacia la web."""
 
@@ -101,16 +110,24 @@ class DetectorObstaculos:
         dir_script = os.path.dirname(os.path.abspath(__file__))
         self.fx, self.fy, self.cx, self.cy = cargar_intrinsecos(dir_script)
 
-        # Pose del robot EN EL MARCO DEL LABERINTO, publicada por
+        # Rumbo del robot EN EL MARCO DEL LABERINTO (grados, antihorario
+        # desde el Este) y su nodo actual, ambos publicados por
         # laberinto_y_a_star (que es quien conoce la pose inicial declarada
-        # en la web). theta en grados, antihorario desde el Este.
-        self.robot_x = 0.0
-        self.robot_y = 0.0
+        # en la web). Con eso se determina el NODO AL FRENTE.
         self.robot_theta = 0.0
+        self.nodo_actual = None
 
-        # Posiciones de los nodos: llegan con el grafo retenido del
-        # planificador (unica fuente de verdad); fallback a la copia local.
-        self.positions = dict(POSICIONES_BASE)
+        # Conexiones del laberinto: llegan con el grafo retenido del
+        # planificador (unica fuente de verdad, incluye ediciones de la web);
+        # fallback a la copia local. Sirven para saber si hay un MURO entre
+        # el nodo actual y el nodo al frente.
+        self.graph_connections = {n: list(v) for n, v in CONEXIONES_BASE.items()}
+
+        # Nodos ya bloqueados por el planificador (vienen en el payload del
+        # grafo retenido). Un obstaculo sobre un nodo bloqueado ya esta
+        # resuelto: NO debe volver a levantar flag_obs, o el robot se
+        # detendria una y otra vez frente a un bloqueo que A* ya rodeo.
+        self.nodos_bloqueados = set()
 
         # Estado del ciclo de obstaculo
         self.estado = self.ESTADO_LIBRE
@@ -141,11 +158,11 @@ class DetectorObstaculos:
 
     def _on_connect(self, client, userdata, flags, rc):
         print(f"[MQTT] Conectado al broker {self.args.broker}:{self.args.puerto}")
-        # Pose del robot en el marco del laberinto (desde laberinto_y_a_star)
-        client.subscribe(mqtt_topics["camara"]["x_cam"])
-        client.subscribe(mqtt_topics["camara"]["y_cam"])
+        # Rumbo y nodo actual del robot en el marco del laberinto
+        # (desde laberinto_y_a_star)
         client.subscribe(mqtt_topics["camara"]["theta_cam"])
-        # Estructura del laberinto (retenida): posiciones de los nodos
+        client.subscribe(mqtt_topics["camara"]["nodo_actual"])
+        # Estructura del laberinto (retenida): conexiones y nodos bloqueados
         client.subscribe(mqtt_topics["planificador"]["grafo"])
 
     def _on_message(self, client, userdata, msg):
@@ -153,18 +170,20 @@ class DetectorObstaculos:
             if msg.topic == mqtt_topics["planificador"]["grafo"]:
                 import json
                 payload = json.loads(msg.payload.decode())
-                posiciones = payload.get("positions")
-                if isinstance(posiciones, dict) and posiciones:
-                    self.positions = {n: tuple(p) for n, p in posiciones.items()}
+                conexiones = payload.get("graph_connections")
+                if isinstance(conexiones, dict) and conexiones:
+                    self.graph_connections = conexiones
+                self.nodos_bloqueados = set(payload.get("nodos_bloqueados") or [])
                 return
 
-            valor = float(msg.payload.decode().strip())
-            if msg.topic == mqtt_topics["camara"]["x_cam"]:
-                self.robot_x = valor
-            elif msg.topic == mqtt_topics["camara"]["y_cam"]:
-                self.robot_y = valor
-            elif msg.topic == mqtt_topics["camara"]["theta_cam"]:
-                self.robot_theta = valor
+            if msg.topic == mqtt_topics["camara"]["nodo_actual"]:
+                nodo = msg.payload.decode().strip()
+                if len(nodo) == 2 and nodo.isdigit():
+                    self.nodo_actual = nodo
+                return
+
+            if msg.topic == mqtt_topics["camara"]["theta_cam"]:
+                self.robot_theta = float(msg.payload.decode().strip())
         except Exception as e:
             print(f"[MQTT ERROR] {msg.topic}: {e}")
 
@@ -195,49 +214,87 @@ class DetectorObstaculos:
         activas = sorted(nombres[i] for i in self.clases_ids)
         print(f"[YOLO] Clases obstaculo activas: {activas}")
 
-    def nodo_mas_cercano(self, x_cm, y_cm):
-        return min(self.positions,
-                   key=lambda n: math.hypot(x_cm - self.positions[n][0],
-                                            y_cm - self.positions[n][1]))
+    def nodo_al_frente(self):
+        """Nodo contiguo hacia el que mira el robot, o None si no se le puede
+        atribuir un obstaculo.
+
+        La regla del sistema: un obstaculo visto por la camara SIEMPRE se
+        asume en la celda contigua al frente del nodo actual (el robot mira
+        por el pasillo que va a recorrer). Devuelve None cuando:
+          - aun no se conoce el nodo actual (el planificador no ha publicado),
+          - el frente queda fuera de la grilla, o
+          - hay un MURO entre ambas celdas: no tiene sentido "ver" un
+            obstaculo a traves de una pared, asi que la deteccion se descarta.
+        """
+        actual = self.nodo_actual
+        if not actual:
+            return None
+
+        # Cuantizar el rumbo (grados antihorario desde el Este) al eje
+        # cardinal mas cercano. Labels: primer digito columna, segundo fila.
+        theta = self.robot_theta % 360.0
+        if theta >= 315.0 or theta < 45.0:
+            d_col, d_fila = 1, 0     # Este
+        elif theta < 135.0:
+            d_col, d_fila = 0, 1     # Norte
+        elif theta < 225.0:
+            d_col, d_fila = -1, 0    # Oeste
+        else:
+            d_col, d_fila = 0, -1    # Sur
+
+        col, fila = int(actual[0]) + d_col, int(actual[1]) + d_fila
+        if not (0 <= col <= 9 and 0 <= fila <= 9):
+            return None
+        frente = f"{col}{fila}"
+        if frente not in self.graph_connections:
+            return None
+
+        # Conexion mutua = pasillo abierto. Si falta, hay un muro entre medio.
+        if (frente not in self.graph_connections.get(actual, [])
+                or actual not in self.graph_connections.get(frente, [])):
+            return None
+        return frente
 
     def evaluar_frame(self, frame):
         """Corre YOLO sobre el frame y devuelve (hay_obstaculo, nodo, dist_cm,
-        detecciones_dibujables). Un obstaculo cuenta si su clase esta en la
-        lista, su base esta en el rango de distancias util, y se puede mapear
-        a un nodo del laberinto. SIN filtro 'es_pared': ese filtro del sistema
-        viejo descartaba justo los objetos a mitad de pasillo (bug conocido);
-        las paredes ya estan modeladas por la ausencia de aristas del grafo."""
+        detecciones_dibujables). Una deteccion cuenta como obstaculo si su
+        clase esta en la lista y su base cae en el rango de distancias util;
+        el nodo afectado es SIEMPRE el nodo al frente del robot (ver
+        nodo_al_frente): si el robot mira un muro o fuera de la grilla, la
+        deteccion se descarta."""
         detecciones = self.detector.detectar(frame)
-        candidato = None  # (dist, nodo)
+        menor_dist = None
         for det in detecciones:
             if det.clase_id not in self.clases_ids:
                 continue
-            x_base, y_base = det.base
+            _, y_base = det.base
             dist = distancia_horizontal(y_base, self.cy, self.fy,
                                         self.args.altura_cam, self.args.pitch_cam)
             if dist is None or not (self.args.dist_min <= dist <= self.args.dist_max):
                 continue
+            if menor_dist is None or dist < menor_dist:
+                menor_dist = dist
 
-            # Posicion global del obstaculo en el marco del laberinto:
-            # rumbo del robot (antihorario) menos la desviacion lateral.
-            beta = desviacion_lateral(x_base, self.cx, self.fx)
-            rumbo = math.radians(self.robot_theta) - beta
-            obs_x = self.robot_x + dist * math.cos(rumbo)
-            obs_y = self.robot_y + dist * math.sin(rumbo)
-            nodo = self.nodo_mas_cercano(obs_x, obs_y)
+        if menor_dist is None:
+            return False, None, None, detecciones
 
-            if candidato is None or dist < candidato[0]:
-                candidato = (dist, nodo)
-
-        if candidato:
-            return True, candidato[1], candidato[0], detecciones
-        return False, None, None, detecciones
+        nodo = self.nodo_al_frente()
+        if nodo is None:
+            return False, None, None, detecciones
+        return True, nodo, menor_dist, detecciones
 
     # ------------------------------------------------------------------
     # MAQUINA DE ESTADOS (PRD A.1-A.3)
     # ------------------------------------------------------------------
     def procesar(self, hay_obstaculo, nodo, dist):
         ahora = time.time()
+
+        # Un obstaculo mapeado a un nodo YA bloqueado no es novedad: el
+        # planificador ya lo rodeo. Se ignora para no re-detener al robot.
+        if hay_obstaculo and nodo in self.nodos_bloqueados:
+            hay_obstaculo = False
+            nodo = None
+            dist = None
 
         if self.estado == self.ESTADO_LIBRE:
             self.racha_presente = self.racha_presente + 1 if hay_obstaculo else 0
@@ -401,10 +458,28 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="smoke test: 15 frames sin broker y salir")
     parser.add_argument("--test-obstaculo", default=None, dest="test_obstaculo",
-                        help="NODO,INICIO_S,DURACION_S — inyecta un obstaculo falso")
+                        help="NODO,INICIO_S,DURACION_S — inyecta un obstaculo falso "
+                             "(NODO='frente' lo ubica en el nodo al frente del robot)")
     args = parser.parse_args()
 
     det = DetectorObstaculos(args)
+
+    if args.test:
+        # Auto-verificacion de la atribucion al NODO AL FRENTE (grafo base)
+        casos = [
+            ("21", 0.0, None, "mirando un muro (21->31) se descarta"),
+            ("21", 90.0, "22", "pasillo abierto al Norte (21->22)"),
+            ("20", 0.0, "30", "pasillo abierto al Este (20->30)"),
+            ("00", 180.0, None, "mirando fuera de la grilla se descarta"),
+            (None, 0.0, None, "sin nodo actual aun, se descarta"),
+        ]
+        for nodo_act, theta, esperado, descripcion in casos:
+            det.nodo_actual, det.robot_theta = nodo_act, theta
+            resultado = det.nodo_al_frente()
+            estado = "OK" if resultado == esperado else "FALLA"
+            print(f"  [{estado}] nodo_al_frente({nodo_act}, {theta:.0f} deg) = "
+                  f"{resultado} — {descripcion}")
+        det.nodo_actual, det.robot_theta = None, 0.0
 
     obstaculo_fake = ObstaculoDePrueba(args.test_obstaculo) if args.test_obstaculo else None
     usar_yolo = obstaculo_fake is None
@@ -434,7 +509,12 @@ def main():
                 hay, nodo, dist, detecciones = det.evaluar_frame(frame)
             else:
                 hay = obstaculo_fake.activo()
-                nodo = obstaculo_fake.nodo if hay else None
+                if hay and obstaculo_fake.nodo == "frente":
+                    # Misma atribucion que YOLO: nodo contiguo al frente
+                    nodo = det.nodo_al_frente()
+                    hay = nodo is not None
+                else:
+                    nodo = obstaculo_fake.nodo if hay else None
                 dist = 50.0 if hay else None
                 detecciones = []
 
