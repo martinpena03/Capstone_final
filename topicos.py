@@ -31,6 +31,8 @@ mqtt_topics = {
         "dist_obs": "robot/camara/dist_obs",                # -> web (distancia al obstaculo, cm)
         "nodo_bloqueado": "robot/camara/nodo_bloqueado",    # camara -> laberinto (bloqueo tras timeout)
         "video": "robot/camara/video",                      # -> web (frames JPEG, POV del robot)
+        "pose_absoluta": "robot/camara/pose_absoluta",      # camara -> laberinto y web (correccion ArUco: x, y, theta)
+        "marcadores": "robot/camara/marcadores",            # -> web (config de marcadores ArUco vigente, retenido)
     },
     "planificador": {
         "grafo": "robot/planificador/grafo",                # -> web (estructura del laberinto, retenido)
@@ -77,6 +79,8 @@ mqtt_topics = {
         "grafo": "robot/comandos/grafo",                    # web -> laberinto (laberinto editado)
         "pose_inicial": "robot/comandos/pose_inicial",      # web -> laberinto (nodo y orientacion de partida)
         "limpiar_bloqueos": "robot/comandos/limpiar_bloqueos",  # web -> laberinto (boton limpiar rastro)
+        "marcadores": "robot/comandos/marcadores",              # web -> camara (asignacion de marcadores ArUco editada)
+        "marcadores_activo": "robot/comandos/marcadores_activo",  # web -> camara (toggle maestro de correccion, retenido)
     },
 }
 # se usa: mqtt_topics["telemetria"]["v_der"], mqtt_topics["estados"]["conexion_esp"], mqtt_topics["comandos"]["duty_der"]

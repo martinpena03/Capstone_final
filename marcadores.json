@@ -1,0 +1,14 @@
+{
+  "markers": [
+    {
+      "id": 1,
+      "celda": "02",
+      "pared": "W"
+    },
+    {
+      "id": 2,
+      "celda": "44",
+      "pared": "N"
+    }
+  ]
+}

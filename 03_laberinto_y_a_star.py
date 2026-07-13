@@ -61,12 +61,11 @@ GRAFO_BASE = {
     "50": ["40", "51"], "51": ["50", "52"], "52": ["51", "53"], "53": ["52", "54"], "54": ["53", "44"],
 }
 
-# Orientaciones validas para la pose inicial (grados, 0 = +X Este,
-# antihorario). Restringirlas a multiplos de 90 mantiene exacta la
-# transformacion odometria <-> laberinto (cos/sin en {-1, 0, 1}).
+# Orientaciones validas para la pose inicial DECLARADA desde la web (grados,
+# 0 = +X Este, antihorario). Solo restringen el formulario de la web: la
+# transformacion odometria <-> laberinto es continua, porque las correcciones
+# absolutas por marcadores ArUco ajustan el origen a angulos arbitrarios.
 ORIENTACIONES_VALIDAS = (0, 90, 180, 270)
-_COS = {0: 1, 90: 0, 180: -1, 270: 0}
-_SIN = {0: 0, 90: 1, 180: 0, 270: -1}
 
 # Referencias que la ESP32 interpreta como "detener robot". Convencion ya
 # implementada en el sistema de control: NO cambiar (PRD A.1).
@@ -101,13 +100,17 @@ class NavegadorLaberinto:
         self.odom_y = 0.0
         self.odom_theta = 0.0  # grados, HORARIO (convencion de la ESP)
 
-        # Pose inicial declarada desde la web. Define la transformacion
-        # rigida odometria -> laberinto. Por defecto: nodo 00 mirando al
-        # Este, es decir ambos marcos coinciden (comportamiento historico).
+        # Transformacion rigida odometria -> laberinto. La siembra la pose
+        # inicial declarada desde la web y la RE-DERIVAN las correcciones
+        # absolutas por marcadores ArUco (por eso origen_theta es continuo).
+        # Por defecto: nodo 00 mirando al Este (ambos marcos coinciden).
         self.origen_x = 0.0
         self.origen_y = 0.0
-        self.origen_theta = 0
+        self.origen_theta = 0.0
+        # Pose DECLARADA en la web (solo para el eco pose_inicial: las
+        # correcciones ArUco mueven el origen interno pero no la declaracion).
         self.pose_nodo = "00"
+        self.pose_theta_decl = 0
 
         self.broker = broker
         self.puerto = puerto
@@ -118,16 +121,22 @@ class NavegadorLaberinto:
     # TRANSFORMACION ODOMETRIA <-> LABERINTO
     # La ESP reporta (x, y) en su marco odometrico, que nace en (0,0) cada
     # vez que se resetea. Si el robot parte en otro nodo u orientado distinto
-    # de 0 grados, hay que rotar y trasladar. PENDIENTE DE LAB: confirmar que
-    # reset_0 pone la odometria de la ESP exactamente en (0,0,0).
+    # de 0 grados, hay que rotar y trasladar. La transformacion es CONTINUA
+    # (cos/sin de origen_theta): las correcciones ArUco fijan el origen en
+    # angulos arbitrarios. PENDIENTE DE LAB: confirmar que reset_0 pone la
+    # odometria de la ESP exactamente en (0,0,0).
     # ------------------------------------------------------------------
+    def _cos_sin_origen(self):
+        rad = math.radians(self.origen_theta)
+        return math.cos(rad), math.sin(rad)
+
     def odom_a_laberinto(self, xo, yo):
-        c, s = _COS[self.origen_theta], _SIN[self.origen_theta]
+        c, s = self._cos_sin_origen()
         return (self.origen_x + xo * c - yo * s,
                 self.origen_y + xo * s + yo * c)
 
     def laberinto_a_odom(self, xl, yl):
-        c, s = _COS[self.origen_theta], _SIN[self.origen_theta]
+        c, s = self._cos_sin_origen()
         dx, dy = xl - self.origen_x, yl - self.origen_y
         return (dx * c + dy * s, -dx * s + dy * c)
 
@@ -269,8 +278,9 @@ class NavegadorLaberinto:
 
         with self._lock:
             self.origen_x, self.origen_y = self.positions[nodo]
-            self.origen_theta = theta
+            self.origen_theta = float(theta)
             self.pose_nodo = nodo
+            self.pose_theta_decl = theta
             # La odometria local se asume en cero hasta que llegue telemetria
             # fresca posterior al reset.
             self.odom_x = self.odom_y = self.odom_theta = 0.0
@@ -288,6 +298,42 @@ class NavegadorLaberinto:
         self._ultima_ruta_json = None
         print(f"[POSE] Origen fijado en nodo {nodo}, theta={theta} grados.")
         self.publicar_pose(ok=True, mensaje=f"Pose aplicada: nodo {nodo}, {theta} grados")
+
+    # ------------------------------------------------------------------
+    # CORRECCION ABSOLUTA POR MARCADORES ARUCO (desde camara_y_deteccion)
+    # ------------------------------------------------------------------
+    def aplicar_correccion_aruco(self, payload_crudo):
+        """Sobreescribe la pose interna del robot con la medicion absoluta de
+        un marcador ArUco. La ESP no permite fijar su odometria en un valor
+        arbitrario (solo resetearla a cero), asi que la sobreescritura se
+        hace RE-DERIVANDO la transformacion odometria -> laberinto: tras
+        aplicarla, la odometria vigente mapea EXACTAMENTE a la pose medida y
+        los deltas futuros acumulan desde ahi. `theta` llega en la convencion
+        de theta_cam (grados antihorario desde el Este) y se integra con la
+        identidad existente theta_lab = origen_theta - odom_theta (la ESP
+        reporta horario)."""
+        try:
+            payload = json.loads(payload_crudo)
+            x_med = float(payload["x"])
+            y_med = float(payload["y"])
+            theta_med = float(payload["theta"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            print(f"[ARUCO] Correccion de pose invalida: {e}")
+            return
+
+        x_antes, y_antes = self.posicion_robot()
+        with self._lock:
+            self.origen_theta = (theta_med + self.odom_theta) % 360.0
+            rad = math.radians(self.origen_theta)
+            c, s = math.cos(rad), math.sin(rad)
+            self.origen_x = x_med - (self.odom_x * c - self.odom_y * s)
+            self.origen_y = y_med - (self.odom_x * s + self.odom_y * c)
+
+        marker = payload.get("marker_id", "?")
+        print(f"[ARUCO] Pose sobreescrita por marcador {marker}: "
+              f"({x_antes:.1f},{y_antes:.1f}) -> ({x_med:.1f},{y_med:.1f}) "
+              f"theta={theta_med:.1f} "
+              f"(delta {x_med - x_antes:+.1f},{y_med - y_antes:+.1f} cm)")
 
     # ------------------------------------------------------------------
     # PUBLICACIONES HACIA LA WEB Y HACIA LA ESP
@@ -315,11 +361,14 @@ class NavegadorLaberinto:
 
     def publicar_pose(self, ok, mensaje):
         # === ENLACE WEB (MQTT/WebSocket) — eco de la pose inicial aplicada hacia el dashboard (retenido) ===
+        # Refleja la pose DECLARADA en la web (las correcciones ArUco mueven
+        # el origen interno, pero no cambian lo que el usuario declaro).
+        x0, y0 = self.positions.get(self.pose_nodo, (self.origen_x, self.origen_y))
         payload = {
             "nodo": self.pose_nodo,
-            "theta": self.origen_theta,
-            "x0": self.origen_x,
-            "y0": self.origen_y,
+            "theta": self.pose_theta_decl,
+            "x0": x0,
+            "y0": y0,
             "ok": ok,
             "mensaje": mensaje,
         }
@@ -400,6 +449,8 @@ class NavegadorLaberinto:
         # Señales del modulo de vision (camara_y_deteccion.py)
         client.subscribe(mqtt_topics["estados"]["flag_obs"])
         client.subscribe(mqtt_topics["camara"]["nodo_bloqueado"])
+        # Pose absoluta por marcadores ArUco: sobreescribe la odometria
+        client.subscribe(mqtt_topics["camara"]["pose_absoluta"])
 
         # Publicar el grafo retenido pisa el de la sesion anterior: las
         # ediciones viven solo en memoria, la web debe ver el grafo vigente.
@@ -446,6 +497,10 @@ class NavegadorLaberinto:
 
             if msg.topic == mqtt_topics["camara"]["nodo_bloqueado"]:
                 self.bloquear_nodo(payload_str)
+                return
+
+            if msg.topic == mqtt_topics["camara"]["pose_absoluta"]:
+                self.aplicar_correccion_aruco(payload_str)
                 return
 
             # Telemetria numerica (marco odometrico de la ESP)
@@ -625,6 +680,33 @@ def modo_test():
     xo, yo = nav.laberinto_a_odom(x, y)
     caso("Transformacion inversa consistente",
          abs(xo - 10.0) < 1e-6 and abs(yo) < 1e-6)
+
+    # Transformacion CONTINUA (angulos arbitrarios, ya no solo multiplos de 90)
+    nav2 = NavegadorLaberinto()
+    nav2.origen_x, nav2.origen_y, nav2.origen_theta = 12.5, -3.0, 87.3
+    x, y = nav2.odom_a_laberinto(20.0, -7.0)
+    xo, yo = nav2.laberinto_a_odom(x, y)
+    caso("Transformacion continua (87.3 grados) invertible",
+         abs(xo - 20.0) < 1e-6 and abs(yo + 7.0) < 1e-6)
+
+    # Correccion ArUco: la pose interna queda EXACTAMENTE en la medicion
+    nav3 = NavegadorLaberinto()
+    nav3.odom_x, nav3.odom_y, nav3.odom_theta = 42.0, 17.0, 33.0
+    nav3.aplicar_correccion_aruco(json.dumps(
+        {"x": 62.4, "y": 31.1, "theta": 88.7, "marker_id": 42}))
+    x, y = nav3.posicion_robot()
+    theta_lab = (nav3.origen_theta - nav3.odom_theta) % 360.0
+    caso("Correccion ArUco sobreescribe posicion y theta internos",
+         abs(x - 62.4) < 1e-6 and abs(y - 31.1) < 1e-6
+         and abs(theta_lab - 88.7) < 1e-6)
+
+    # ...y la odometria posterior acumula desde la pose corregida
+    rad = math.radians(nav3.origen_theta)
+    nav3.odom_x += 10.0  # la ESP avanza 10 cm sobre su eje X odometrico
+    x2, y2 = nav3.posicion_robot()
+    caso("La odometria posterior acumula desde la pose corregida",
+         abs(x2 - (62.4 + 10.0 * math.cos(rad))) < 1e-6
+         and abs(y2 - (31.1 + 10.0 * math.sin(rad))) < 1e-6)
 
     print(f"\n[TEST] {'TODO OK' if not fallos else f'{len(fallos)} fallos: {fallos}'}")
     return 0 if not fallos else 1
