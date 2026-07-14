@@ -66,7 +66,7 @@ from yolo_backend import cargar_detector
 # ============================================================================
 # CONSTANTES DE LA LOCALIZACION POR MARCADORES ARUCO (editar aqui)
 # ============================================================================
-MARKER_SIZE_CM = 4.0       # lado del cuadrado negro del ArUco impreso, en cm
+MARKER_SIZE_CM = 14.8       # lado del cuadrado negro del ArUco impreso, en cm
 OFFSET_CAMARA_CM = 10.0    # el centro de giro del robot esta 10 cm DETRAS de la lente
 CELL_SIZE = 30             # cm entre centros de celdas contiguas (igual que el planificador)
 ARCHIVO_MARCADORES = "marcadores.json"  # persistencia de la asignacion (junto al script)
@@ -87,7 +87,6 @@ CONEXIONES_BASE = {
 # model.names al cargar el detector (los ids escritos a mano del sistema viejo
 # estaban mal rotulados: 67 es "cell phone", no "mesa").
 CLASES_OBSTACULO_DEFECTO = (
-
     "bottle", "cup",  "potted plant",
 )
 
@@ -929,12 +928,12 @@ def main():
                         help="motor YOLO: ultralytics (PC) o yolov5 torch.hub (Jetson)")
     parser.add_argument("--clases", default=",".join(CLASES_OBSTACULO_DEFECTO),
                         help="clases COCO consideradas obstaculo (por nombre)")
-    parser.add_argument("--n-persistencia", type=int, default=3, dest="n_persistencia",
+    parser.add_argument("--n-persistencia", type=int, default=1, dest="n_persistencia",
                         help="frames consecutivos para confirmar (o descartar) un obstaculo")
     parser.add_argument("--intervalo-reevaluacion", type=float, default=1.0,
                         dest="intervalo_reevaluacion",
                         help="segundos entre re-verificaciones del obstaculo (PRD A.2)")
-    parser.add_argument("--timeout-bloqueo", type=float, default=10.0,
+    parser.add_argument("--timeout-bloqueo", type=float, default=5.0,
                         dest="timeout_bloqueo",
                         help="segundos de espera maxima antes de bloquear el nodo (PRD A.3)")
     parser.add_argument("--dist-min", type=float, default=7.0, dest="dist_min",
@@ -942,7 +941,7 @@ def main():
     parser.add_argument("--dist-max", type=float, default=120.0, dest="dist_max",
                         help="cm maximos para considerar un obstaculo")
     # Localizacion absoluta por marcadores ArUco (facilmente editables)
-    parser.add_argument("--aruco-dist-max", type=float, default=50.0,
+    parser.add_argument("--aruco-dist-max", type=float, default=100.0,
                         dest="aruco_dist_max",
                         help="cm maximos al marcador para aceptar una correccion de pose")
     parser.add_argument("--aruco-correcciones-seg", type=float, default=2.0,

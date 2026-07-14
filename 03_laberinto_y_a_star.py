@@ -25,6 +25,8 @@ Ejecutar:  python 03_laberinto_y_a_star.py [--broker localhost] [--destino 54]
 Smoke test sin broker:  python 03_laberinto_y_a_star.py --test
 """
 
+#publicar_refs_detencion es la que hay que comentar dependiendo si se quiere seteear el -10 o no 
+
 import argparse
 import json
 import math
@@ -568,7 +570,7 @@ class NavegadorLaberinto:
         # Detencion por obstaculo: manda sobre cualquier otra cosa (PRD A.1).
         if self.flag_obs_activa and self.estado != "idle":
             self.estado = "detenido_obstaculo"
-            self.publicar_refs_detencion()
+           # self.publicar_refs_detencion()
             self.publicar_estado()
             return
         if self.estado == "detenido_obstaculo" and not self.flag_obs_activa:
